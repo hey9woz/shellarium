@@ -1,0 +1,957 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# countdown - a practical terminal countdown timer.
+#
+# This is an original Bash implementation. Existing countdown/timer CLI projects
+# were used only as feature references; no third-party source code is copied here.
+
+readonly PROG="${0##*/}"
+readonly VERSION="0.2.0"
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_dir="$(cd -- "${script_dir}/.." && pwd -P)"
+state_base="${COUNTDOWN_STATE_HOME:-${XDG_STATE_HOME:-${HOME}/.local/state}}"
+presets_dir="${repo_dir}/scripts/countdown/config"
+presets_file="${presets_dir}/presets"
+presets_example_file="${presets_dir}/presets.example"
+history_file="${state_base}/countdown/history.tsv"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  countdown [options] DURATION|PRESET [-- COMMAND...]
+  countdown [options] until HH:MM [-- COMMAND...]
+  countdown [options] at HH:MM [-- COMMAND...]
+  countdown presets
+  countdown history [-n COUNT]
+  countdown edit-presets
+
+Duration:
+  10              10 seconds
+  10s             10 seconds
+  2m              2 minutes
+  1h30m           1 hour 30 minutes
+  01:30           1 minute 30 seconds
+  01:02:03        1 hour 2 minutes 3 seconds
+
+Built-in presets:
+  tea, coffee, pomodoro, break, standup, lunch
+
+Options:
+  -t, --title TEXT       Title shown above the timer
+  -m, --message TEXT     Message shown when the timer finishes
+  -b, --bell COUNT       Ring terminal bell COUNT times on finish (default: 3)
+  -n, --notify           Send a desktop notification if notify-send is available (default)
+  -p, --plain            Print one updating line instead of full-screen display
+      --no-clear         Do not clear the screen in full-screen display
+      --quiet            Disable finish bell, sound, and notification
+      --repeat COUNT     Run the main timer COUNT times
+      --cycles COUNT     Alias for --repeat
+      --break DURATION   Break timer between repeated cycles
+      --snooze DURATION  Snooze duration for the finish menu (default: 5m)
+      --then COMMAND     Run COMMAND through the shell after all timers finish
+      --sound            Play a simple terminal/system sound on finish
+      --sound-file PATH  Play PATH with paplay, aplay, or afplay on finish
+      --log              Append completed timers to history
+      --version          Show version
+  -h, --help             Show this help
+
+Requirements:
+  Bash and GNU coreutils (uses date -d; currently Linux-oriented)
+
+Security:
+  --then COMMAND runs COMMAND with bash -c. Use it only with trusted input.
+  Prefer -- COMMAND... when shell parsing is not required.
+
+Interactive controls:
+  space, p               Pause or resume
+  +                      Add 60 seconds
+  -                      Subtract 60 seconds
+  q, Esc                 Quit without running the follow-up command
+
+Finish menu:
+  Enter                  Continue
+  r                      Restart the same timer
+  s                      Snooze
+  q, Esc                 Quit
+
+Preset file:
+  scripts/countdown/config/presets
+
+Preset format:
+  name=duration
+  name=duration|title|finish message
+
+Examples:
+  countdown 5m
+  countdown pomodoro
+  countdown until 18:00
+  countdown --repeat 4 --break 5m pomodoro
+  countdown -t "Tea" -m "Tea is ready" tea
+  countdown 25m --then 'notify-send "Pomodoro finished"'
+  countdown 25m -- notify-send "Pomodoro finished"
+USAGE
+}
+
+die() {
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  exit 1
+}
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+is_non_negative_integer() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+is_positive_integer() {
+  [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "$value"
+}
+
+title_case() {
+  local value="$1"
+  printf '%s%s\n' "${value:0:1}" "${value:1}" | awk '{print toupper(substr($0,1,1)) substr($0,2)}'
+}
+
+parse_colon_duration() {
+  local input="$1"
+  local first second third
+
+  IFS=':' read -r first second third <<< "$input"
+
+  if [[ -n "${third:-}" ]]; then
+    is_non_negative_integer "$first" || return 1
+    is_non_negative_integer "$second" || return 1
+    is_non_negative_integer "$third" || return 1
+    (( second < 60 )) || return 1
+    (( third < 60 )) || return 1
+    printf '%d\n' $((10#$first * 3600 + 10#$second * 60 + 10#$third))
+    return 0
+  fi
+
+  is_non_negative_integer "$first" || return 1
+  is_non_negative_integer "$second" || return 1
+  (( second < 60 )) || return 1
+  printf '%d\n' $((10#$first * 60 + 10#$second))
+}
+
+parse_unit_duration() {
+  local input="$1"
+  local rest="$input"
+  local total=0
+  local matched=0
+  local number unit
+
+  while [[ "$rest" =~ ^([0-9]+)([dhms])(.*)$ ]]; do
+    number="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    rest="${BASH_REMATCH[3]}"
+    matched=1
+
+    case "$unit" in
+      d) total=$((total + 10#$number * 86400)) ;;
+      h) total=$((total + 10#$number * 3600)) ;;
+      m) total=$((total + 10#$number * 60)) ;;
+      s) total=$((total + 10#$number)) ;;
+      *) return 1 ;;
+    esac
+  done
+
+  [[ "$matched" -eq 1 && -z "$rest" ]] || return 1
+  printf '%d\n' "$total"
+}
+
+parse_duration() {
+  local input="$1"
+
+  [[ -n "$input" ]] || return 1
+
+  if [[ "$input" == *:* ]]; then
+    parse_colon_duration "$input"
+    return
+  fi
+
+  if is_non_negative_integer "$input"; then
+    printf '%d\n' $((10#$input))
+    return
+  fi
+
+  parse_unit_duration "$input"
+}
+
+parse_target_time() {
+  local input="$1"
+  local now target
+
+  now="$(date +%s)"
+
+  if [[ "$input" =~ ^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?$ ]]; then
+    target="$(date -d "today $input" +%s 2>/dev/null)" || return 1
+    if (( target <= now )); then
+      target="$(date -d "tomorrow $input" +%s 2>/dev/null)" || return 1
+    fi
+    printf '%d\n' "$target"
+    return 0
+  fi
+
+  target="$(date -d "$input" +%s 2>/dev/null)" || return 1
+  (( target > now )) || return 1
+  printf '%d\n' "$target"
+}
+
+format_duration() {
+  local seconds="$1"
+  local days hours minutes
+
+  (( seconds < 0 )) && seconds=0
+  days=$((seconds / 86400))
+  hours=$(((seconds % 86400) / 3600))
+  minutes=$(((seconds % 3600) / 60))
+  seconds=$((seconds % 60))
+
+  if (( days > 0 )); then
+    printf '%dd %02d:%02d:%02d\n' "$days" "$hours" "$minutes" "$seconds"
+  elif (( hours > 0 )); then
+    printf '%02d:%02d:%02d\n' "$hours" "$minutes" "$seconds"
+  else
+    printf '%02d:%02d\n' "$minutes" "$seconds"
+  fi
+}
+
+format_clock() {
+  local epoch="$1"
+  date -d "@$epoch" '+%H:%M:%S'
+}
+
+terminal_columns() {
+  if has_cmd tput; then
+    tput cols 2>/dev/null || printf '80\n'
+  else
+    printf '80\n'
+  fi
+}
+
+terminal_lines() {
+  if has_cmd tput; then
+    tput lines 2>/dev/null || printf '24\n'
+  else
+    printf '24\n'
+  fi
+}
+
+center_line() {
+  local text="$1"
+  local cols pad right
+
+  cols="$(terminal_columns)"
+  if (( ${#text} >= cols )); then
+    printf '%s\n' "$text"
+    return
+  fi
+
+  pad=$(((cols - ${#text}) / 2))
+  right=$((cols - pad - ${#text}))
+  printf '%*s%s%*s\n' "$pad" '' "$text" "$right" ''
+}
+
+blank_line() {
+  local cols
+
+  cols="$(terminal_columns)"
+  printf '%*s\n' "$cols" ''
+}
+
+progress_bar() {
+  local total="$1"
+  local remaining="$2"
+  local width="${3:-24}"
+  local elapsed filled empty pct
+
+  (( total <= 0 )) && total=1
+  (( remaining < 0 )) && remaining=0
+  (( remaining > total )) && remaining="$total"
+  elapsed=$((total - remaining))
+  filled=$((elapsed * width / total))
+  empty=$((width - filled))
+  pct=$((elapsed * 100 / total))
+
+  printf '['
+  for ((i = 0; i < filled; i++)); do printf '#'; done
+  for ((i = 0; i < empty; i++)); do printf '-'; done
+  printf '] %d%%\n' "$pct"
+}
+
+render_full() {
+  local title="$1"
+  local remaining="$2"
+  local paused="$3"
+  local message="$4"
+  local no_clear="$5"
+  local total="$6"
+  local end_epoch="$7"
+  local phase="$8"
+  local cycle_label="$9"
+  local footer="${10}"
+  local lines top_pad formatted status end_clock bar phase_display frame
+
+  formatted="$(format_duration "$remaining")"
+  end_clock="$(format_clock "$end_epoch")"
+  bar="$(progress_bar "$total" "$remaining" 28)"
+  phase_display="$phase"
+  [[ "$phase_display" == "$title" ]] && phase_display=""
+  status=""
+  (( paused == 1 )) && status=" [paused]"
+
+  lines="$(terminal_lines)"
+  top_pad=$(((lines - 11) / 2))
+  (( top_pad < 0 )) && top_pad=0
+
+  frame="$(
+    for ((i = 0; i < top_pad; i++)); do
+      blank_line
+    done
+
+    [[ -n "$title" ]] && center_line "$title"
+    [[ -n "$cycle_label" ]] && center_line "$cycle_label"
+    [[ -n "$phase_display" ]] && center_line "$phase_display"
+    center_line "$formatted$status"
+    center_line "$bar"
+    center_line "ends at $end_clock"
+    [[ -n "$message" && "$remaining" -eq 0 ]] && center_line "$message"
+    blank_line
+    center_line "$footer"
+  )"
+
+  if (( no_clear == 0 )) && has_cmd tput; then
+    tput cup 0 0 2>/dev/null || true
+    printf '%s\n' "$frame"
+    tput ed 2>/dev/null || true
+  else
+    printf '%s\n' "$frame"
+  fi
+}
+
+render_plain() {
+  local title="$1"
+  local remaining="$2"
+  local paused="$3"
+  local message="$4"
+  local total="$5"
+  local end_epoch="$6"
+  local phase="$7"
+  local cycle_label="$8"
+  local formatted status prefix suffix end_clock bar phase_display
+
+  formatted="$(format_duration "$remaining")"
+  end_clock="$(format_clock "$end_epoch")"
+  bar="$(progress_bar "$total" "$remaining" 16)"
+  bar="${bar//$'\n'/}"
+  phase_display="$phase"
+  [[ "$phase_display" == "$title" ]] && phase_display=""
+  status=""
+  (( paused == 1 )) && status=" [paused]"
+  prefix=""
+  suffix=""
+  [[ -n "$title" ]] && prefix="$title: "
+  [[ -n "$phase_display" ]] && prefix="${prefix}${phase_display}: "
+  [[ -n "$cycle_label" ]] && prefix="${prefix}${cycle_label}: "
+  [[ -n "$message" && "$remaining" -eq 0 ]] && suffix=" - $message"
+
+  printf '\r%s%s%s | ends %s | %s%s' "$prefix" "$formatted" "$status" "$end_clock" "$bar" "$suffix"
+}
+
+split_preset_value() {
+  local value="$1"
+  preset_duration="${value%%|*}"
+  preset_title=""
+  preset_message=""
+
+  if [[ "$value" == *'|'* ]]; then
+    local rest
+    rest="${value#*|}"
+    preset_title="${rest%%|*}"
+    if [[ "$rest" == *'|'* ]]; then
+      preset_message="${rest#*|}"
+    fi
+  fi
+
+  preset_duration="$(trim "$preset_duration")"
+  preset_title="$(trim "$preset_title")"
+  preset_message="$(trim "$preset_message")"
+}
+
+get_builtin_preset() {
+  local name="$1"
+
+  case "$name" in
+    tea) split_preset_value '3m|Tea|Tea is ready' ;;
+    coffee) split_preset_value '4m|Coffee|Coffee is ready' ;;
+    pomodoro) split_preset_value '25m|Pomodoro|Pomodoro finished' ;;
+    break) split_preset_value '5m|Break|Break finished' ;;
+    standup) split_preset_value '15m|Standup|Standup finished' ;;
+    lunch) split_preset_value '45m|Lunch|Lunch finished' ;;
+    *) return 1 ;;
+  esac
+}
+
+get_preset_from_file() {
+  local file="$1"
+  local name="$2"
+  local line key value
+
+  [[ -f "$file" ]] || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    [[ -z "$line" || "${line:0:1}" == '#' ]] && continue
+    [[ "$line" == *'='* ]] || continue
+
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+    if [[ "$key" == "$name" ]]; then
+      split_preset_value "$value"
+      return 0
+    fi
+  done < "$file"
+
+  return 1
+}
+
+get_repo_preset() {
+  get_preset_from_file "$presets_file" "$1"
+}
+
+get_preset() {
+  local name="$1"
+
+  if get_repo_preset "$name"; then
+    return 0
+  fi
+
+  get_builtin_preset "$name"
+}
+
+list_presets() {
+  printf 'Built-in presets:\n'
+  printf '  %-10s %s\n' tea '3m | Tea | Tea is ready'
+  printf '  %-10s %s\n' coffee '4m | Coffee | Coffee is ready'
+  printf '  %-10s %s\n' pomodoro '25m | Pomodoro | Pomodoro finished'
+  printf '  %-10s %s\n' break '5m | Break | Break finished'
+  printf '  %-10s %s\n' standup '15m | Standup | Standup finished'
+  printf '  %-10s %s\n' lunch '45m | Lunch | Lunch finished'
+
+  if [[ -f "$presets_file" ]]; then
+    printf '\nRepository presets:\n'
+    sed -n '/^[[:space:]]*#/d; /^[[:space:]]*$/d; p' "$presets_file"
+  else
+    printf '\nRepository presets:\n  none\n'
+  fi
+
+  printf '\nPreset file:\n  %s\n' "$presets_file"
+  if [[ -f "$presets_example_file" ]]; then
+    printf '\nPreset example:\n  %s\n' "$presets_example_file"
+  fi
+}
+
+edit_presets() {
+  local editor
+
+  mkdir -p "$presets_dir"
+  if [[ ! -f "$presets_file" ]]; then
+    if [[ -f "$presets_example_file" ]]; then
+      cp "$presets_example_file" "$presets_file"
+    else
+      cat > "$presets_file" <<'PRESETS'
+# countdown presets
+# Format:
+#   name=duration
+#   name=duration|title|finish message
+#
+# Examples:
+# focus=50m|Deep work|Focus block finished
+# stretch=2m|Stretch|Move for a bit
+PRESETS
+    fi
+  fi
+
+  editor="${EDITOR:-vi}"
+  "$editor" "$presets_file"
+}
+
+show_history() {
+  local count="${1:-20}"
+
+  [[ -f "$history_file" ]] || {
+    printf 'No history yet: %s\n' "$history_file"
+    return 0
+  }
+
+  is_positive_integer "$count" || die 'history count must be a positive integer'
+  tail -n "$count" "$history_file"
+}
+
+append_history() {
+  local started_epoch="$1"
+  local ended_epoch="$2"
+  local title="$3"
+  local phase="$4"
+  local planned_seconds="$5"
+  local result="$6"
+  local cycle="$7"
+  local started ended
+
+  (( log_history == 1 )) || return 0
+
+  mkdir -p "$(dirname "$history_file")"
+  started="$(date -d "@$started_epoch" '+%Y-%m-%dT%H:%M:%S%z')"
+  ended="$(date -d "@$ended_epoch" '+%Y-%m-%dT%H:%M:%S%z')"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$started" "$ended" "$title" "$phase" "$planned_seconds" "$result" "$cycle" >> "$history_file"
+}
+
+play_sound_file() {
+  local path="$1"
+
+  [[ -f "$path" ]] || {
+    printf '%s: sound file not found: %s\n' "$PROG" "$path" >&2
+    return 0
+  }
+
+  if has_cmd paplay; then
+    paplay "$path" >/dev/null 2>&1 || true
+  elif has_cmd aplay; then
+    aplay "$path" >/dev/null 2>&1 || true
+  elif has_cmd afplay; then
+    afplay "$path" >/dev/null 2>&1 || true
+  else
+    printf '%s: no supported audio player found for --sound-file\n' "$PROG" >&2
+  fi
+}
+
+finish_alerts() {
+  local title="$1"
+  local message="$2"
+  local i
+
+  (( quiet == 1 )) && return 0
+
+  for ((i = 0; i < bell_count; i++)); do
+    printf '\a'
+    sleep 0.15
+  done
+
+  if (( sound == 1 )); then
+    if [[ -n "$sound_file" ]]; then
+      play_sound_file "$sound_file"
+    elif has_cmd canberra-gtk-play; then
+      canberra-gtk-play -i complete >/dev/null 2>&1 || true
+    else
+      printf '\a\a'
+    fi
+  fi
+
+  if (( notify == 1 )); then
+    if has_cmd notify-send; then
+      notify-send "${title:-Countdown finished}" "${message:-Done}" || true
+    fi
+  fi
+}
+
+prompt_finish_action() {
+  local title="$1"
+  local message="$2"
+  local total="$3"
+  local phase="$4"
+  local cycle_label="$5"
+  local key
+
+  if (( interactive == 0 )); then
+    finish_action="continue"
+    return 0
+  fi
+
+  render_full "$title" 0 0 "$message" "$no_clear" "$total" "$(date +%s)" "$phase" "$cycle_label" \
+    'Enter: continue  r: restart  s: snooze  q: quit'
+
+  while true; do
+    IFS= read -rsn1 key || key=""
+    case "$key" in
+      '') finish_action="continue"; return 0 ;;
+      r|R) finish_action="restart"; return 0 ;;
+      s|S) finish_action="snooze"; return 0 ;;
+      q|Q|$'\e') finish_action="quit"; return 0 ;;
+    esac
+  done
+}
+
+run_countdown_once() {
+  local duration="$1"
+  local title="$2"
+  local message="$3"
+  local phase="$4"
+  local cycle_label="$5"
+  local remaining="$duration"
+  local paused=0
+  local last_epoch current_epoch elapsed render_state last_rendered key end_epoch footer
+
+  last_epoch="$(date +%s)"
+  timer_started_epoch="$last_epoch"
+  last_rendered=""
+  footer='space/p: pause  +: add 60s  -: subtract 60s  q: quit'
+
+  while (( remaining > 0 )); do
+    current_epoch="$(date +%s)"
+
+    if (( paused == 0 )); then
+      elapsed=$((current_epoch - last_epoch))
+      if (( elapsed > 0 )); then
+        remaining=$((remaining - elapsed))
+        (( remaining < 0 )) && remaining=0
+        last_epoch="$current_epoch"
+      fi
+    else
+      last_epoch="$current_epoch"
+    fi
+
+    (( remaining == 0 )) && break
+
+    end_epoch=$((current_epoch + remaining))
+    render_state="$remaining:$paused:$end_epoch"
+    if [[ "$render_state" != "$last_rendered" ]]; then
+      if (( plain == 1 || interactive == 0 )); then
+        render_plain "$title" "$remaining" "$paused" "" "$duration" "$end_epoch" "$phase" "$cycle_label"
+      else
+        render_full "$title" "$remaining" "$paused" "" "$no_clear" "$duration" "$end_epoch" "$phase" "$cycle_label" "$footer"
+      fi
+      last_rendered="$render_state"
+    fi
+
+    if (( interactive == 1 )); then
+      if IFS= read -rsn1 -t 0.2 key; then
+        case "$key" in
+          ' '|p|P)
+            if (( paused == 1 )); then
+              paused=0
+            else
+              paused=1
+            fi
+            ;;
+          '+')
+            remaining=$((remaining + 60))
+            duration=$((duration + 60))
+            ;;
+          '-')
+            remaining=$((remaining - 60))
+            duration=$((duration - 60))
+            (( remaining < 0 )) && remaining=0
+            (( duration < 1 )) && duration=1
+            ;;
+          q|Q|$'\e')
+            timer_ended_epoch="$(date +%s)"
+            append_history "$timer_started_epoch" "$timer_ended_epoch" "$title" "$phase" "$duration" "quit" "$cycle_label"
+            return 130
+            ;;
+        esac
+      fi
+    else
+      sleep 0.2
+    fi
+  done
+
+  timer_ended_epoch="$(date +%s)"
+  if (( plain == 1 || interactive == 0 )); then
+    render_plain "$title" 0 0 "$message" "$duration" "$timer_ended_epoch" "$phase" "$cycle_label"
+    printf '\n'
+  else
+    render_full "$title" 0 0 "$message" "$no_clear" "$duration" "$timer_ended_epoch" "$phase" "$cycle_label" "$footer"
+  fi
+
+  append_history "$timer_started_epoch" "$timer_ended_epoch" "$title" "$phase" "$duration" "done" "$cycle_label"
+  return 0
+}
+
+run_timer_session() {
+  local duration="$1"
+  local title="$2"
+  local message="$3"
+  local phase="$4"
+  local cycle_label="$5"
+  local active_duration="$duration"
+  local active_title="$title"
+  local active_message="$message"
+
+  while true; do
+    run_countdown_once "$active_duration" "$active_title" "$active_message" "$phase" "$cycle_label" || return $?
+    finish_alerts "$active_title" "$active_message"
+    prompt_finish_action "$active_title" "$active_message" "$active_duration" "$phase" "$cycle_label"
+
+    case "$finish_action" in
+      continue)
+        return 0
+        ;;
+      restart)
+        active_duration="$duration"
+        active_title="$title"
+        active_message="$message"
+        ;;
+      snooze)
+        active_duration="$snooze_seconds"
+        active_title="${title} (snooze)"
+        active_message="Snooze finished"
+        phase="Snooze"
+        ;;
+      quit)
+        return 130
+        ;;
+    esac
+  done
+}
+
+cleanup() {
+  if [[ "${cursor_hidden:-0}" -eq 1 ]] && has_cmd tput; then
+    tput cnorm 2>/dev/null || true
+  fi
+  if [[ "${plain:-0}" -eq 1 && "${finished:-0}" -eq 0 ]]; then
+    printf '\n'
+  fi
+}
+
+handle_subcommand() {
+  local subcommand="${1:-}"
+  shift || true
+
+  case "$subcommand" in
+    presets)
+      list_presets
+      exit 0
+      ;;
+    edit-presets)
+      edit_presets
+      exit 0
+      ;;
+    history)
+      local count=20
+      while (($#)); do
+        case "$1" in
+          -n|--count)
+            shift
+            (($#)) || die 'history -n requires a count'
+            count="$1"
+            ;;
+          *)
+            die "unknown history argument: $1"
+            ;;
+        esac
+        shift
+      done
+      show_history "$count"
+      exit 0
+      ;;
+  esac
+}
+
+handle_subcommand "$@"
+
+title="Countdown"
+message="Done"
+title_set=0
+message_set=0
+bell_count=3
+notify=1
+plain=0
+no_clear=0
+quiet=0
+repeat_count=1
+break_seconds=0
+snooze_seconds=300
+sound=0
+sound_file=""
+log_history=0
+positional=()
+after_command=()
+finish_action="continue"
+timer_started_epoch=0
+timer_ended_epoch=0
+
+while (($#)); do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --version)
+      printf '%s %s\n' "$PROG" "$VERSION"
+      exit 0
+      ;;
+    -t|--title)
+      shift
+      (($#)) || die '--title requires text'
+      title="$1"
+      title_set=1
+      ;;
+    -m|--message)
+      shift
+      (($#)) || die '--message requires text'
+      message="$1"
+      message_set=1
+      ;;
+    -b|--bell)
+      shift
+      (($#)) || die '--bell requires a count'
+      is_non_negative_integer "$1" || die '--bell must be a non-negative integer'
+      bell_count="$1"
+      ;;
+    -n|--notify)
+      notify=1
+      ;;
+    -p|--plain)
+      plain=1
+      ;;
+    --no-clear)
+      no_clear=1
+      ;;
+    --quiet)
+      quiet=1
+      bell_count=0
+      notify=0
+      sound=0
+      sound_file=""
+      ;;
+    --repeat|--cycles)
+      option_name="$1"
+      shift
+      (($#)) || die "$option_name requires a count"
+      is_positive_integer "$1" || die '--repeat/--cycles must be a positive integer'
+      repeat_count="$1"
+      ;;
+    --break)
+      shift
+      (($#)) || die '--break requires a duration'
+      break_seconds="$(parse_duration "$1")" || die "invalid break duration: $1"
+      (( break_seconds > 0 )) || die '--break must be greater than zero'
+      ;;
+    --snooze)
+      shift
+      (($#)) || die '--snooze requires a duration'
+      snooze_seconds="$(parse_duration "$1")" || die "invalid snooze duration: $1"
+      (( snooze_seconds > 0 )) || die '--snooze must be greater than zero'
+      ;;
+    --then)
+      shift
+      (($#)) || die '--then requires a command'
+      after_command=(bash -c "$1")
+      ;;
+    --sound)
+      sound=1
+      ;;
+    --sound-file)
+      shift
+      (($#)) || die '--sound-file requires a path'
+      sound=1
+      sound_file="$1"
+      ;;
+    --log)
+      log_history=1
+      ;;
+    --)
+      shift
+      after_command=("$@")
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      positional+=("$1")
+      ;;
+  esac
+  shift
+done
+
+((${#positional[@]})) || die 'duration, preset, or target time is required; use --help for usage'
+
+duration_seconds=0
+target_epoch=0
+preset_name=""
+
+case "${positional[0]}" in
+  until|at)
+    ((${#positional[@]} == 2)) || die "'${positional[0]}' requires exactly one target time"
+    target_epoch="$(parse_target_time "${positional[1]}")" || die "invalid future target time: ${positional[1]}"
+    duration_seconds=$((target_epoch - $(date +%s)))
+    (( duration_seconds > 0 )) || die "target time is not in the future: ${positional[1]}"
+    if (( title_set == 0 )); then
+      title="Until ${positional[1]}"
+    fi
+    if (( message_set == 0 )); then
+      message="Reached ${positional[1]}"
+    fi
+    ;;
+  *)
+    ((${#positional[@]} == 1)) || die "unexpected arguments: ${positional[*]}"
+    if duration_seconds="$(parse_duration "${positional[0]}" 2>/dev/null)"; then
+      :
+    elif get_preset "${positional[0]}"; then
+      preset_name="${positional[0]}"
+      duration_seconds="$(parse_duration "$preset_duration")" || die "invalid preset duration for $preset_name: $preset_duration"
+      if [[ "$title_set" -eq 0 && -n "$preset_title" ]]; then
+        title="$preset_title"
+      elif (( title_set == 0 )); then
+        title="$(title_case "$preset_name")"
+      fi
+      if [[ "$message_set" -eq 0 && -n "$preset_message" ]]; then
+        message="$preset_message"
+      fi
+    else
+      die "invalid duration or unknown preset: ${positional[0]}"
+    fi
+    ;;
+esac
+
+is_non_negative_integer "$duration_seconds" || die "invalid duration: ${positional[*]}"
+(( duration_seconds > 0 )) || die 'duration must be greater than zero'
+
+interactive=0
+if [[ -t 0 && -t 1 && "$plain" -eq 0 ]]; then
+  interactive=1
+fi
+
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+cursor_hidden=0
+finished=0
+if (( interactive == 1 )) && has_cmd tput; then
+  if tput civis 2>/dev/null; then
+    cursor_hidden=1
+  fi
+fi
+
+for ((cycle = 1; cycle <= repeat_count; cycle++)); do
+  cycle_label=""
+  if (( repeat_count > 1 )); then
+    cycle_label="cycle ${cycle}/${repeat_count}"
+  fi
+
+  run_timer_session "$duration_seconds" "$title" "$message" "Focus" "$cycle_label" || exit $?
+
+  if (( cycle < repeat_count && break_seconds > 0 )); then
+    run_timer_session "$break_seconds" "Break" "Break finished" "Break" "$cycle_label" || exit $?
+  fi
+done
+
+finished=1
+
+if ((${#after_command[@]})); then
+  "${after_command[@]}"
+fi

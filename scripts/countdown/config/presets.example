@@ -1,0 +1,13 @@
+# Example countdown presets.
+#
+# Copy entries you want into:
+#   scripts/countdown/config/presets
+#
+# Format:
+#   name=duration
+#   name=duration|title|finish message
+
+deepwork=50m|Deep Work|Focus block finished
+stretch=3m|Stretch|Time to move
+review=15m|Review|Review session finished
+tea=4m|Tea|Tea is ready
