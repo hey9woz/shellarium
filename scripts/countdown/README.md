@@ -57,22 +57,26 @@ shortwork=15m|Short Work|Focus block finished
 ```text
 -t, --title TEXT       Title shown above the timer
 -m, --message TEXT     Message shown when the timer finishes
--b, --bell COUNT       Ring terminal bell COUNT times on finish (default: 3)
+-b, --bell COUNT       Ring once on start and COUNT times on finish (default: 1)
 -n, --notify           Send a desktop notification if notify-send is available (default)
 -p, --plain            Print one updating line instead of full-screen display
     --no-clear         Do not clear the screen in full-screen display
-    --quiet            Disable finish bell, sound, and notification
+    --quiet            Disable start/finish sounds and notification
     --repeat COUNT     Run the main timer COUNT times
     --cycles COUNT     Alias for --repeat
     --break DURATION   Break timer between repeated cycles
     --snooze DURATION  Snooze duration for the finish menu
     --then COMMAND     Run COMMAND through the shell after all timers finish
-    --sound            Play a simple terminal/system sound on finish
-    --sound-file PATH  Play PATH with paplay, aplay, or afplay on finish
+    --sound            Use a system sound on start and finish
+    --sound-file PATH  Play PATH with paplay, aplay, or afplay on start and finish
     --log              Append completed timers to history
     --version          Show version
 -h, --help             Show help
 ```
+
+タイマーの開始時と終了時に音が鳴ります。通常は端末ベルを1回鳴らします。
+`--sound` または `--sound-file` を指定した場合は、端末ベルの代わりにその音を使います。
+`--bell 0` で端末ベルを無効にでき、`--quiet` では音とデスクトップ通知をすべて無効にします。
 
 > [!WARNING]
 > `--then COMMAND` は `bash -c` で実行されます。信頼できない文字列や外部入力を渡さないでください。
@@ -130,4 +134,4 @@ countdown --help
 
 - Bash
 - GNU coreutils (`date -d` を使用するため、現状は Linux 向けです)
-- 任意: `notify-send`、`paplay` / `aplay` / `afplay`
+- 任意: `notify-send`、`canberra-gtk-play`、`paplay` / `aplay` / `afplay`

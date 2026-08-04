@@ -17,7 +17,7 @@
 
 - Bash
 - GNU coreutils (`date -d` を使用するため、現状は Linux 向けです)
-- 任意: `notify-send`、`paplay` / `aplay` / `afplay`
+- 任意: `notify-send`、`canberra-gtk-play`、`paplay` / `aplay` / `afplay`
 
 ### PATH を通す
 

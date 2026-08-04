@@ -7,7 +7,7 @@ set -euo pipefail
 # were used only as feature references; no third-party source code is copied here.
 
 readonly PROG="${0##*/}"
-readonly VERSION="0.2.0"
+readonly VERSION="0.2.1"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_dir="$(cd -- "${script_dir}/.." && pwd -P)"
@@ -41,24 +41,25 @@ Built-in presets:
 Options:
   -t, --title TEXT       Title shown above the timer
   -m, --message TEXT     Message shown when the timer finishes
-  -b, --bell COUNT       Ring terminal bell COUNT times on finish (default: 3)
+  -b, --bell COUNT       Ring once on start and COUNT times on finish (default: 1)
   -n, --notify           Send a desktop notification if notify-send is available (default)
   -p, --plain            Print one updating line instead of full-screen display
       --no-clear         Do not clear the screen in full-screen display
-      --quiet            Disable finish bell, sound, and notification
+      --quiet            Disable start/finish sounds and notification
       --repeat COUNT     Run the main timer COUNT times
       --cycles COUNT     Alias for --repeat
       --break DURATION   Break timer between repeated cycles
       --snooze DURATION  Snooze duration for the finish menu (default: 5m)
       --then COMMAND     Run COMMAND through the shell after all timers finish
-      --sound            Play a simple terminal/system sound on finish
-      --sound-file PATH  Play PATH with paplay, aplay, or afplay on finish
+      --sound            Use a system sound on start and finish
+      --sound-file PATH  Play PATH with paplay, aplay, or afplay on start and finish
       --log              Append completed timers to history
       --version          Show version
   -h, --help             Show this help
 
 Requirements:
   Bash and GNU coreutils (uses date -d; currently Linux-oriented)
+  Optional: notify-send, canberra-gtk-play, paplay, aplay, or afplay
 
 Security:
   --then COMMAND runs COMMAND with bash -c. Use it only with trusted input.
@@ -538,50 +539,77 @@ play_sound_file() {
   fi
 }
 
-finish_alerts() {
-  local title="$1"
-  local message="$2"
+play_alert() {
+  local event="$1"
+  local repeats="$bell_count"
+  local system_event="complete"
   local i
 
   (( quiet == 1 )) && return 0
-
-  for ((i = 0; i < bell_count; i++)); do
-    printf '\a'
-    sleep 0.15
-  done
 
   if (( sound == 1 )); then
     if [[ -n "$sound_file" ]]; then
       play_sound_file "$sound_file"
     elif has_cmd canberra-gtk-play; then
-      canberra-gtk-play -i complete >/dev/null 2>&1 || true
+      [[ "$event" == "start" ]] && system_event="bell"
+      canberra-gtk-play -i "$system_event" >/dev/null 2>&1 || true
     else
-      printf '\a\a'
+      printf '\a'
     fi
+    return 0
   fi
+
+  if [[ "$event" == "start" && "$repeats" -gt 0 ]]; then
+    repeats=1
+  fi
+
+  for ((i = 0; i < repeats; i++)); do
+    printf '\a'
+    if (( i + 1 < repeats )); then
+      sleep 0.15
+    fi
+  done
+}
+
+start_alerts() {
+  play_alert start
+}
+
+finish_alerts() {
+  local title="$1"
+  local message="$2"
+
+  play_alert finish
+
+  (( quiet == 1 )) && return 0
 
   if (( notify == 1 )); then
     if has_cmd notify-send; then
-      notify-send "${title:-Countdown finished}" "${message:-Done}" || true
+      notify-send "${title:-Countdown finished}" "${message:-Done}" >/dev/null 2>&1 || true
     fi
   fi
 }
 
-prompt_finish_action() {
+render_finish_screen() {
   local title="$1"
   local message="$2"
   local total="$3"
   local phase="$4"
   local cycle_label="$5"
+
+  (( interactive == 1 )) || return 0
+
+  render_full "$title" 0 0 "$message" "$no_clear" "$total" "$(date +%s)" "$phase" "$cycle_label" \
+    'Enter: continue  r: restart  s: snooze  q: quit'
+}
+
+prompt_finish_action() {
   local key
 
   if (( interactive == 0 )); then
     finish_action="continue"
     return 0
   fi
-
-  render_full "$title" 0 0 "$message" "$no_clear" "$total" "$(date +%s)" "$phase" "$cycle_label" \
-    'Enter: continue  r: restart  s: snooze  q: quit'
 
   while true; do
     IFS= read -rsn1 key || key=""
@@ -672,8 +700,6 @@ run_countdown_once() {
   if (( plain == 1 || interactive == 0 )); then
     render_plain "$title" 0 0 "$message" "$duration" "$timer_ended_epoch" "$phase" "$cycle_label"
     printf '\n'
-  else
-    render_full "$title" 0 0 "$message" "$no_clear" "$duration" "$timer_ended_epoch" "$phase" "$cycle_label" "$footer"
   fi
 
   append_history "$timer_started_epoch" "$timer_ended_epoch" "$title" "$phase" "$duration" "done" "$cycle_label"
@@ -691,9 +717,11 @@ run_timer_session() {
   local active_message="$message"
 
   while true; do
+    start_alerts
     run_countdown_once "$active_duration" "$active_title" "$active_message" "$phase" "$cycle_label" || return $?
+    render_finish_screen "$active_title" "$active_message" "$active_duration" "$phase" "$cycle_label"
     finish_alerts "$active_title" "$active_message"
-    prompt_finish_action "$active_title" "$active_message" "$active_duration" "$phase" "$cycle_label"
+    prompt_finish_action
 
     case "$finish_action" in
       continue)
@@ -766,7 +794,7 @@ title="Countdown"
 message="Done"
 title_set=0
 message_set=0
-bell_count=3
+bell_count=1
 notify=1
 plain=0
 no_clear=0
