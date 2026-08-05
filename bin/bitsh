@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# bitsh - encode text as binary with a terminal-friendly presentation.
+
+readonly PROG="${0##*/}"
+readonly VERSION="0.1.0"
+
+plain=0
+commit=0
+assume_yes=0
+dry_run=0
+declare -a text_parts=()
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  bitsh [options] [TEXT...]
+  printf '%s' TEXT | bitsh [options]
+
+Options:
+  -p, --plain    Print only the binary value without terminal effects
+  -c, --commit   Commit staged Git changes using the binary value as the message
+  -n, --dry-run  Preview the commit without creating it
+  -y, --yes      Skip the confirmation prompt used by --commit
+      --version  Show version
+  -h, --help     Show this help
+
+Input:
+  Each input byte is rendered as an 8-bit value. Multiple TEXT arguments are
+  joined with a single space. If TEXT is omitted, input is read from stdin.
+
+Git safety:
+  --commit operates on the Git repository containing the current directory.
+  It commits only changes that are already staged; bitsh never runs git add.
+  An interactive confirmation is required unless --yes is specified.
+
+Requirements:
+  Bash and od (GNU coreutils)
+  Git is required only with --commit
+
+Examples:
+  bitsh "Happy National AI Day"
+  bitsh --plain hello
+  printf 'hello' | bitsh --plain
+  git add path/to/file
+  bitsh --commit "ship it"
+  bitsh --commit --dry-run "ship it"
+USAGE
+}
+
+die() {
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  exit 1
+}
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+join_text_parts() {
+  local part
+  local separator=""
+
+  text=""
+  for part in "${text_parts[@]}"; do
+    text+="${separator}${part}"
+    separator=" "
+  done
+}
+
+read_stdin() {
+  IFS= read -r -d '' text < <(cat; printf '\0') || true
+}
+
+byte_to_binary() {
+  local byte="$1"
+  local bit
+
+  for ((bit = 7; bit >= 0; bit--)); do
+    printf '%d' "$(((byte >> bit) & 1))"
+  done
+}
+
+encode_text() {
+  local input="$1"
+  local line byte octet
+  local output=""
+  local -a bytes=()
+
+  while IFS= read -r line; do
+    read -r -a bytes <<< "$line"
+    for byte in "${bytes[@]}"; do
+      octet="$(byte_to_binary "$byte")"
+      if [[ -n "$output" ]]; then
+        output+=" "
+      fi
+      output+="$octet"
+    done
+  done < <(printf '%s' "$input" | LC_ALL=C od -An -v -t u1)
+
+  printf '%s' "$output"
+}
+
+render_binary() {
+  local binary="$1"
+  local octet
+  local index=0
+  local -a octets=()
+
+  if (( plain )) || [[ ! -t 1 ]] || [[ "${TERM:-dumb}" == "dumb" ]]; then
+    printf '%s\n' "$binary"
+    return
+  fi
+
+  read -r -a octets <<< "$binary"
+  if [[ -z "${NO_COLOR:-}" ]]; then
+    printf '\033[2;32m[bitsh://encoder] stream acquired (%d bytes)\033[0m\n' "${#octets[@]}"
+    printf '\033[1;32m> \033[0m'
+  else
+    printf '[bitsh://encoder] stream acquired (%d bytes)\n> ' "${#octets[@]}"
+  fi
+
+  for octet in "${octets[@]}"; do
+    (( index > 0 )) && printf ' '
+    if [[ -z "${NO_COLOR:-}" ]]; then
+      printf '\033[1;32m%s\033[0m' "$octet"
+    else
+      printf '%s' "$octet"
+    fi
+    sleep 0.015
+    ((index += 1))
+  done
+  printf '\n'
+}
+
+check_git_commit() {
+  local diff_status
+
+  has_cmd git || die "git is required with --commit"
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    die "the current directory is not inside a Git work tree"
+
+  set +e
+  git diff --cached --quiet --exit-code
+  diff_status=$?
+  set -e
+
+  case "$diff_status" in
+    0) die "there are no staged changes to commit; run git add first" ;;
+    1) ;;
+    *) die "could not inspect staged changes" ;;
+  esac
+}
+
+confirm_commit() {
+  local answer
+
+  (( assume_yes )) && return 0
+  [[ -t 0 ]] || die "confirmation requires a terminal; use --yes to continue"
+
+  printf 'Commit these staged changes? [y/N] ' >&2
+  IFS= read -r answer
+  case "$answer" in
+    y|Y|yes|YES|Yes) return 0 ;;
+    *) printf '%s: commit cancelled\n' "$PROG" >&2; return 1 ;;
+  esac
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    -p|--plain)
+      plain=1
+      ;;
+    -c|--commit)
+      commit=1
+      ;;
+    -n|--dry-run)
+      dry_run=1
+      ;;
+    -y|--yes)
+      assume_yes=1
+      ;;
+    --version)
+      printf '%s %s\n' "$PROG" "$VERSION"
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      text_parts+=("$@")
+      break
+      ;;
+    -*)
+      die "unknown option: $1 (see --help)"
+      ;;
+    *)
+      text_parts+=("$1")
+      ;;
+  esac
+  shift
+done
+
+(( dry_run == 0 || commit == 1 )) || die "--dry-run requires --commit"
+(( assume_yes == 0 || commit == 1 )) || die "--yes requires --commit"
+has_cmd od || die "od is required"
+
+if (( ${#text_parts[@]} > 0 )); then
+  join_text_parts
+elif [[ ! -t 0 ]]; then
+  read_stdin
+else
+  die "text is required (see --help)"
+fi
+
+[[ -n "$text" ]] || die "input text must not be empty"
+binary="$(encode_text "$text")"
+(( commit == 0 )) || check_git_commit
+render_binary "$binary"
+
+if (( commit )); then
+  printf '%s: staged changes:\n' "$PROG" >&2
+  git diff --cached --stat >&2
+
+  if (( dry_run )); then
+    printf '%s: dry run; no commit was created\n' "$PROG" >&2
+    exit 0
+  fi
+
+  confirm_commit || exit 1
+  git commit -m "$binary"
+fi

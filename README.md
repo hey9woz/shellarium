@@ -16,7 +16,8 @@
 ### Requirements
 
 - Bash
-- GNU coreutils (`date -d` を使用するため、現状は Linux 向けです)
+- GNU coreutils (`countdown` は `date -d`、`bitsh` は `od` を使用します)
+- 任意: Git (`bitsh --commit` で使用します)
 - 任意: `notify-send`、`canberra-gtk-play`、`paplay` / `aplay` / `afplay`
 
 ### PATH を通す
@@ -56,6 +57,19 @@ countdown --repeat 4 --break 5m pomodoro
 
 詳細: [`scripts/countdown/README.md`](./scripts/countdown/README.md)
 
+### `bitsh`
+
+入力テキストを 8 bit の二進数へ変換して端末に表示します。ステージ済みの Git の変更を、
+二進数をコミットメッセージとしてコミットすることもできます。
+
+```bash
+bitsh "Happy National AI Day"
+bitsh --plain hello
+bitsh --commit --dry-run "ship it"
+```
+
+詳細: [`scripts/bitsh/README.md`](./scripts/bitsh/README.md)
+
 ## 🧬 Repository Map
 
 ```text
@@ -72,6 +86,7 @@ shellarium/
 - `countdown --then COMMAND` は `bash -c` でコマンドを実行します。信頼できない文字列や外部入力を渡さないでください。
 - `countdown -- COMMAND...` はシェルを介さず、指定した引数をそのまま実行します。可能ならこちらを使用してください。
 - `countdown edit-presets` はリポジトリ内の `scripts/countdown/config/presets` を直接編集します。
+- `bitsh --commit` はステージ済みの変更だけをコミットし、`git add` は実行しません。
 - 履歴は `--log` を指定した場合だけ `${XDG_STATE_HOME:-~/.local/state}/countdown/history.tsv` に保存されます。
 - トークン、秘密鍵、個人用認証情報はリポジトリへ追加しないでください。
 
@@ -84,6 +99,10 @@ bash -n bin/countdown
 shellcheck bin/countdown
 ./bin/countdown --help
 ./bin/countdown --plain --quiet 1s
+bash -n bin/bitsh
+shellcheck bin/bitsh
+./bin/bitsh --help
+./bin/bitsh --plain hello
 ```
 
 ## 🛠️ Adding A Command
