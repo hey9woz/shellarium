@@ -17,6 +17,7 @@
 
 - Bash
 - GNU coreutils (`countdown` は `date -d`、`bitsh` は `od` を使用します)
+- 任意: tmux (`layout` で使用します)
 - 任意: Git (`bitsh --commit` で使用します)
 - 任意: `notify-send`、`canberra-gtk-play`、`paplay` / `aplay` / `afplay`
 
@@ -70,6 +71,19 @@ bitsh --commit --dry-run "ship it"
 
 詳細: [`scripts/bitsh/README.md`](./scripts/bitsh/README.md)
 
+### `layout`
+
+現在の tmux pane から、既定・対話指定・ランダムの pane layout を作ります。
+
+```bash
+layout
+layout default
+layout custom
+layout --dry-run random
+```
+
+詳細: [`scripts/layout/README.md`](./scripts/layout/README.md)
+
 ## 🧬 Repository Map
 
 ```text
@@ -87,6 +101,7 @@ shellarium/
 - `countdown -- COMMAND...` はシェルを介さず、指定した引数をそのまま実行します。可能ならこちらを使用してください。
 - `countdown edit-presets` はリポジトリ内の `scripts/countdown/config/presets` を直接編集します。
 - `bitsh --commit` はステージ済みの変更だけをコミットし、`git add` は実行しません。
+- `layout` は現在の tmux pane を分割します。`--dry-run` では変更せず、実行予定のコマンドだけを表示します。
 - 履歴は `--log` を指定した場合だけ `${XDG_STATE_HOME:-~/.local/state}/countdown/history.tsv` に保存されます。
 - トークン、秘密鍵、個人用認証情報はリポジトリへ追加しないでください。
 
@@ -103,6 +118,10 @@ bash -n bin/bitsh
 shellcheck bin/bitsh
 ./bin/bitsh --help
 ./bin/bitsh --plain hello
+bash -n bin/layout
+shellcheck bin/layout
+./bin/layout --help
+./bin/layout --dry-run default
 ```
 
 ## 🛠️ Adding A Command

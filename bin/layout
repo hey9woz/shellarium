@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# layout - create a small tmux pane layout interactively or by mode name.
+
+readonly PROG="${0##*/}"
+readonly VERSION="0.1.0"
+
+mode=""
+dry_run=0
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  layout [options] [default|custom|random]
+
+Modes:
+  default  Split the current pane top/bottom at 70% / 30%
+  custom   Interactively create 2-5 panes
+  random   Create 2-4 panes with random directions and sizes
+
+  If no mode is given, an interactive mode menu is shown.
+
+Options:
+  -n, --dry-run  Show tmux commands without changing the current layout
+      --version  Show version
+  -h, --help     Show this help
+
+Requirements:
+  Bash and tmux. Run inside an existing tmux session unless using --dry-run.
+
+Examples:
+  layout
+  layout default
+  layout custom
+  layout --dry-run default
+USAGE
+}
+
+die() {
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  exit 1
+}
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+is_integer_in_range() {
+  local value="$1"
+  local minimum="$2"
+  local maximum="$3"
+
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  (( 10#$value >= minimum && 10#$value <= maximum ))
+}
+
+prompt() {
+  local message="$1"
+  local variable_name="$2"
+  local value
+
+  printf '%s' "$message" >&2
+  IFS= read -r value || die "could not read interactive input"
+  printf -v "$variable_name" '%s' "$value"
+}
+
+run_tmux() {
+  if (( dry_run )); then
+    printf 'tmux'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    tmux "$@"
+  fi
+}
+
+split_pane() {
+  local direction="$1"
+  local percent="$2"
+
+  run_tmux split-window "-${direction}" -l "${percent}%"
+}
+
+choose_mode() {
+  local selection
+
+  printf '%s\n' \
+    '🌐 Choose your tmux layout mode:' \
+    '1: Default  (Vertical split: 70% / 30%)' \
+    '2: Custom   (Interactive split)' \
+    '3: Random   (Random directions and ratios)' >&2
+  prompt 'Enter your choice (1/2/3): ' selection
+
+  case "$selection" in
+    1) mode="default" ;;
+    2) mode="custom" ;;
+    3) mode="random" ;;
+    *) die "invalid selection: choose 1, 2, or 3" ;;
+  esac
+}
+
+apply_default_layout() {
+  printf '%s\n' '🚀 Applying default layout (Vertical split: 70% / 30%)' >&2
+  split_pane v 30
+}
+
+apply_custom_layout() {
+  local count direction percent
+  local index
+
+  printf '%s\n' '⚙️  Custom layout selected.' >&2
+  prompt 'How many panes do you want? (2-5): ' count
+  is_integer_in_range "$count" 2 5 || die "pane count must be an integer from 2 to 5"
+
+  for ((index = 1; index < 10#$count; index++)); do
+    prompt "[$index] Split direction? (Vertical: v / Horizontal: h): " direction
+    case "$direction" in
+      v|h) ;;
+      *) die "split direction must be 'v' or 'h'" ;;
+    esac
+
+    prompt "[$index] Size percentage for the new pane (1-99): " percent
+    is_integer_in_range "$percent" 1 99 || die "pane size must be an integer from 1 to 99"
+    split_pane "$direction" "$percent"
+  done
+}
+
+apply_random_layout() {
+  local count direction percent label
+  local index
+
+  count=$((RANDOM % 3 + 2))
+  printf '%s\n' '🎲 Generating a random layout...' "➡️ Number of panes: $count" >&2
+
+  for ((index = 1; index < count; index++)); do
+    percent=$((RANDOM % 61 + 20))
+    if (( RANDOM % 2 == 0 )); then
+      direction="v"
+      label="🔻 Vertical"
+    else
+      direction="h"
+      label="🔺 Horizontal"
+    fi
+
+    printf '[%d] %s split at %d%%\n' "$index" "$label" "$percent" >&2
+    split_pane "$direction" "$percent"
+  done
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    -n|--dry-run)
+      dry_run=1
+      ;;
+    --version)
+      printf '%s %s\n' "$PROG" "$VERSION"
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      (( $# <= 1 )) || die "too many arguments (see --help)"
+      if (( $# == 1 )); then
+        [[ -z "$mode" ]] || die "only one mode may be specified"
+        mode="$1"
+      fi
+      break
+      ;;
+    -*)
+      die "unknown option: $1 (see --help)"
+      ;;
+    *)
+      [[ -z "$mode" ]] || die "only one mode may be specified"
+      mode="$1"
+      ;;
+  esac
+  shift
+done
+
+case "$mode" in
+  "") choose_mode ;;
+  default|1) mode="default" ;;
+  custom|2) mode="custom" ;;
+  random|3) mode="random" ;;
+  *) die "unknown mode: $mode (expected default, custom, or random)" ;;
+esac
+
+if (( ! dry_run )); then
+  has_cmd tmux || die "tmux is required"
+  [[ -n "${TMUX:-}" ]] || die "run this command inside a tmux session"
+  tmux display-message -p '#{pane_id}' >/dev/null 2>&1 ||
+    die "could not connect to the current tmux session"
+fi
+
+case "$mode" in
+  default) apply_default_layout ;;
+  custom) apply_custom_layout ;;
+  random) apply_random_layout ;;
+esac
