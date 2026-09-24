@@ -17,8 +17,9 @@
 
 - Bash
 - GNU coreutils (`countdown` は `date -d`、`bitsh` は `od` を使用します)
+- Git (`gitwhy` では必須、`bitsh` では `--commit` 使用時のみ)
 - 任意: tmux (`layout` で使用します)
-- 任意: Git (`bitsh --commit` で使用します)
+- 任意: `fzf` (`gitwhy` の対話的なファイル選択で使用します)
 - 任意: `notify-send`、`canberra-gtk-play`、`paplay` / `aplay` / `afplay`
 
 ### PATH を通す
@@ -71,6 +72,20 @@ bitsh --commit --dry-run "ship it"
 
 詳細: [`scripts/bitsh/README.md`](./scripts/bitsh/README.md)
 
+### `gitwhy`
+
+ファイルと行番号を指定し、そのコードが現在の形になるまでの Git の変更履歴を読みやすく表示します。
+basename や一意なパス末尾でも管理対象ファイルを指定できます。
+
+```bash
+gitwhy src/app.ts:42
+gitwhy app.ts:42
+gitwhy src/app.ts:40-60
+gitwhy --max-count 5 app.ts:42
+```
+
+詳細: [`scripts/gitwhy/README.md`](./scripts/gitwhy/README.md)
+
 ### `layout`
 
 現在の tmux pane から、既定・対話指定・ランダムの pane layout を作ります。
@@ -101,6 +116,7 @@ shellarium/
 - `countdown -- COMMAND...` はシェルを介さず、指定した引数をそのまま実行します。可能ならこちらを使用してください。
 - `countdown edit-presets` はリポジトリ内の `scripts/countdown/config/presets` を直接編集します。
 - `bitsh --commit` はステージ済みの変更だけをコミットし、`git add` は実行しません。
+- `gitwhy` は `git log -L` と `git ls-files` を使う読み取り専用コマンドです。
 - `layout` は現在の tmux pane を分割します。`--dry-run` では変更せず、実行予定のコマンドだけを表示します。
 - 履歴は `--log` を指定した場合だけ `${XDG_STATE_HOME:-~/.local/state}/countdown/history.tsv` に保存されます。
 - トークン、秘密鍵、個人用認証情報はリポジトリへ追加しないでください。
@@ -118,6 +134,10 @@ bash -n bin/bitsh
 shellcheck bin/bitsh
 ./bin/bitsh --help
 ./bin/bitsh --plain hello
+bash -n bin/gitwhy
+shellcheck bin/gitwhy
+./bin/gitwhy --help
+./bin/gitwhy --version
 bash -n bin/layout
 shellcheck bin/layout
 ./bin/layout --help
