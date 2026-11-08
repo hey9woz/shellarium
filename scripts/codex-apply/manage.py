@@ -1,4 +1,4 @@
-"""Preview and atomically deploy two files; capture uses an isolated Git index."""
+"""Preview and deploy global Codex files; capture uses an isolated Git index."""
 import base64
 from contextlib import contextmanager
 import difflib
@@ -7,18 +7,59 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 from validate import Invalid, validate
 
 REPO = Path(__file__).resolve().parents[2]
 NAMES = ("config.toml", "AGENTS.md")
-REL = tuple("scripts/codex-apply/config/" + name for name in NAMES)
 VERSION_PREFIX = "chore(codex-apply): capture v"
+
+PROFILE = re.compile(r"[A-Za-z0-9_-]+\.config\.toml\Z")
+
+
+def relative_paths(names):
+    return tuple("scripts/codex-apply/config/" + name for name in names)
+
+
+def discover_names(directory):
+    names = set(NAMES)
+    for path in directory.glob("*.config.toml"):
+        if not PROFILE.fullmatch(path.name):
+            raise Invalid("unsupported profile filename; use letters, numbers, hyphens and underscores (name suppressed)")
+        names.add(path.name)
+    return names
+
+
+def tracked_names(revision):
+    if not revision:
+        return set()
+    prefix = "scripts/codex-apply/config/"
+    result = git("ls-tree", "-r", "-z", "--name-only", revision, "--", prefix)
+    names = set()
+    for entry in result.stdout.split(b"\0"):
+        if not entry:
+            continue
+        name = entry.decode().removeprefix(prefix)
+        if "/" in name:
+            continue
+        if name in NAMES or PROFILE.fullmatch(name):
+            names.add(name)
+        elif name.endswith(".config.toml"):
+            raise Invalid("unsupported tracked profile filename (name suppressed)")
+    return names
+
+
+def managed_names(source, target, revision):
+    all_names = discover_names(source) | discover_names(target) | tracked_names(revision)
+    return (*NAMES, *sorted(all_names - set(NAMES)))
+
 
 
 def say(message):
@@ -48,16 +89,66 @@ def contents(snap):
     return None if snap is None else snap[0]
 
 
-def checked_files(directory, required):
+def checked_files(directory, required, local=False, names=None):
     result = {}
-    for name in NAMES:
+    selected = names if names is not None else (*NAMES, *sorted(discover_names(directory) - set(NAMES)))
+    for name in selected:
         result[name] = snapshot(directory / name)
         if result[name] is None:
-            if required:
+            if required and name in NAMES:
                 raise Invalid("missing file: " + quoted(directory / name))
         else:
-            validate(name, contents(result[name]))
+            validate(name, contents(result[name]), allow_projects=local)
     return result
+
+
+def dump_toml(data):
+    """Emit the validated subset; TOML comments have no parsed representation."""
+    def literal(value):
+        if isinstance(value, str):
+            return json.dumps(value, ensure_ascii=False)
+        if type(value) is bool:
+            return "true" if value else "false"
+        if type(value) in {int, float}:
+            return str(value).lower()
+        if isinstance(value, list):
+            return "[" + ", ".join(literal(item) for item in value) + "]"
+        if isinstance(value, dict):
+            return "{ " + ", ".join(json.dumps(key, ensure_ascii=False) + " = " + literal(item) for key, item in value.items()) + " }"
+        raise Invalid("unsupported TOML value while preserving local settings (value suppressed)")
+
+    lines = []
+    def table(path, values):
+        if path:
+            lines.extend(["", "[" + ".".join(json.dumps(key, ensure_ascii=False) for key in path) + "]"])
+        for key, value in values.items():
+            if not isinstance(value, dict):
+                lines.append(json.dumps(key, ensure_ascii=False) + " = " + literal(value))
+        for key, value in values.items():
+            if isinstance(value, dict):
+                table(path + [key], value)
+    table([], data)
+    return ("\n".join(lines).lstrip("\n") + "\n").encode()
+
+
+def portable_config(content):
+    data = tomllib.loads(content.decode())
+    if "projects" not in data:
+        return content
+    del data["projects"]
+    return dump_toml(data)
+
+
+def preserve_projects(shared, current):
+    if current is None:
+        return shared
+    local = tomllib.loads(current.decode())
+    if "projects" not in local:
+        return shared
+    result = tomllib.loads(shared.decode())
+    result["projects"] = local["projects"]
+    return dump_toml(result)
+
 
 
 def git(*args, env=None, check=True):
@@ -73,13 +164,14 @@ def head():
     return result.stdout.decode().strip() if result.returncode == 0 else None
 
 
-def git_files(revision):
+def git_files(revision, names=NAMES):
     files = {}
-    for name, path in zip(NAMES, REL):
+    for name, path in zip(names, relative_paths(names)):
         result = git("show", f"{revision}:{path}", check=False) if revision else None
         files[name] = result.stdout if result and result.returncode == 0 else None
         if files[name] is not None:
-            validate(name, files[name])
+            # Legacy snapshots may contain projects; new captures must exclude them.
+            validate(name, files[name], allow_projects=True)
     return files
 
 
@@ -135,9 +227,14 @@ def replace_files(directory, desired, before, pending, backup=None):
         raise Invalid("unfinished operation; inspect recovery file: " + quoted(pending))
     atomic(pending, payload(directory, before))
     try:
-        for name in NAMES:
-            if desired[name] != contents(before[name]):
-                atomic(directory / name, desired[name])
+        for name, content in desired.items():
+            if content != contents(before[name]):
+                path = directory / name
+                if content is None:
+                    safe_path(path)
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic(path, content)
         if backup:
             safe_path(backup)
             os.replace(pending, backup)
@@ -167,18 +264,18 @@ def preview(source, target, old, desired, label, number, capture):
     if capture:
         say(f"  Commit   {VERSION_PREFIX}{number:04d}")
     say("")
-    for name in NAMES:
-        state = "SAME" if old[name] == desired[name] else "NEW" if old[name] is None else "UPDATE"
+    for name in desired:
+        state = "SAME" if old[name] == desired[name] else "DELETE" if desired[name] is None else "NEW" if old[name] is None else "UPDATE"
         say(f"  {state:<8} {name}")
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
-    for name in NAMES:
+    for name in desired:
         if old[name] == desired[name]:
             continue
         print(f"\n── {name} " + "─" * 40)
         lines = difflib.unified_diff((old[name] or b"").decode().splitlines(keepends=True),
-                                     desired[name].decode().splitlines(keepends=True),
+                                     (desired[name] or b"").decode().splitlines(keepends=True),
                                      fromfile="current/" + name if old[name] is not None else "/dev/null",
-                                     tofile="capture/" + name if capture else "repository/" + name)
+                                     tofile="/dev/null" if desired[name] is None else "capture/" + name if capture else "repository/" + name)
         for line in lines:
             prefix = "\033[32m" if line.startswith("+") else "\033[31m" if line.startswith("-") else ""
             print((prefix if color else "") + line.rstrip("\n") + ("\033[0m" if color and prefix else ""))
@@ -192,10 +289,10 @@ def confirm(capture):
         raise Invalid("confirmation requires a terminal; no files were changed")
     say("")
     if capture:
-        say("対象の2ファイルだけを取り込み、コミットします。")
+        say("表示した対象ファイルだけを同期し、コミットします。DELETEのファイルは削除します。")
         prompt = "取り込み・コミットを実行しますか？ [y/N] "
     else:
-        say("変更前の2ファイルの状態をバックアップします（保持は1世代）。")
+        say("表示した全対象の変更前の状態をバックアップします（保持は1世代）。DELETEのファイルは削除します。")
         prompt = "適用しますか？ [y/N] "
     print(prompt, end="", file=sys.stderr, flush=True)
     if sys.stdin.readline().strip().lower() not in {"y", "yes"}:
@@ -225,10 +322,10 @@ def check_git_operation():
 def check_capture(revision, source, local):
     check_git_operation()
     # Avoid overwriting pre-existing staged versions of our own files.
-    if git("diff", "--cached", "--quiet", "--", *REL, check=False).returncode:
+    if git("diff", "--cached", "--quiet", "--", *relative_paths(source), check=False).returncode:
         raise Invalid("managed config files are staged; unstage them before capture")
-    committed = git_files(revision)
-    for name in NAMES:
+    committed = git_files(revision, source)
+    for name in source:
         current = contents(local[name])
         if current not in (committed[name], source[name]):
             raise Invalid("uncommitted edits in repository config; reconcile locally before capture: " + name)
@@ -265,7 +362,8 @@ def commit_capture(message, revision, desired, state, branch):
             git("read-tree", revision, env=env)
         else:
             git("read-tree", "--empty", env=env)
-        git("add", "--", *REL, env=env)
+        paths = relative_paths(desired)
+        git("add", "--", *paths, env=env)
         expected_tree = git("write-tree", env=env).stdout.strip()
         for hook, args in (("pre-commit", ()), ("prepare-commit-msg", (message_path, "message")),
                            ("commit-msg", (message_path,))):
@@ -274,12 +372,17 @@ def commit_capture(message, revision, desired, state, branch):
             raise Invalid("commit hook changed the reviewed index; no commit was created")
         if Path(message_path).read_bytes() != message_bytes:
             raise Invalid("commit hook changed the fixed version message; no commit was created")
-        for name, path in zip(NAMES, REL):
-            staged = git("show", ":" + path, env=env).stdout
+        for name, path in zip(desired, paths):
+            entry = git("show", ":" + path, env=env, check=False)
+            staged = entry.stdout if entry.returncode == 0 else None
             if staged != desired[name]:
                 raise Invalid("Git filter changed validated settings; capture not committed")
-            validate(name, staged)
-        if any(contents(snapshot(REPO / path)) != desired[name] for name, path in zip(NAMES, REL)):
+            if staged is not None:
+                validate(name, staged)
+        present = {name for name, content in desired.items() if content is not None}
+        if discover_names(REPO / "scripts/codex-apply/config") != present:
+            raise Invalid("repository profile list changed during hooks; retry capture")
+        if any(contents(snapshot(REPO / path)) != desired[name] for name, path in zip(desired, paths)):
             raise Invalid("repository settings changed during hooks; review them before retrying capture")
         if head() != revision or capture_branch() != branch:
             raise Invalid("Git HEAD/branch changed during capture; retry")
@@ -301,7 +404,7 @@ def commit_capture(message, revision, desired, state, branch):
         git("update-ref", "-m", message, branch, commit_id, revision or "")
         say("  OK  " + commit_id[:12] + "  " + message)
         try:
-            git("reset", "--quiet", commit_id, "--", *REL)
+            git("reset", "--quiet", commit_id, "--", *paths)
         except Invalid:
             raise Invalid("capture was committed, but the real index could not be synchronized; inspect git status locally") from None
         try:
@@ -343,27 +446,42 @@ def main():
         revision = head()
         number = version()
         source_dir, target_dir = (home, repo_config) if capture else (repo_config, home)
-        source = checked_files(source_dir, required=True)
-        before = checked_files(target_dir, required=False)
-        desired = {name: contents(source[name]) for name in NAMES}
-        old = {name: contents(before[name]) for name in NAMES}
+        names = managed_names(source_dir, target_dir, revision)
+        source = checked_files(source_dir, required=True, local=capture, names=names)
+        before = checked_files(target_dir, required=False, local=True, names=names)
+        desired = {name: contents(source[name]) for name in names}
+        for name, content in desired.items():
+            if content is None:
+                continue
+            if name.endswith(".toml"):
+                desired[name] = portable_config(content) if capture else preserve_projects(content, contents(before[name]))
+            validate(name, desired[name], allow_projects=not capture)
+        old = {name: contents(before[name]) for name in names}
         branch = capture_branch() if capture else None
         if capture:
             old = check_capture(revision, desired, before)
-        changed = any(old[name] != desired[name] for name in NAMES)
-        if not changed and all(contents(before[name]) == desired[name] for name in NAMES):
+        changed = any(old[name] != desired[name] for name in names)
+        if not changed and all(contents(before[name]) == desired[name] for name in names):
             say("変更はありません。")
             return
         next_number = number + 1 if capture else number
         previous_label = f"v{number:04d}" if number else "unversioned"
         label = f"{previous_label} → v{next_number:04d}" if capture else previous_label
-        if not capture and (git("ls-files", "--error-unmatch", "--", *REL, check=False).returncode
-                            or git("diff", "--quiet", "HEAD", "--", *REL, check=False).returncode):
+        if not capture and (git("ls-files", "--error-unmatch", "--", *relative_paths(names), check=False).returncode
+                            or git("diff", "--quiet", "HEAD", "--", *relative_paths(names), check=False).returncode):
             label = "working tree (base: " + label + ")"
+        project_snapshots = source if capture else before
+        has_projects = any(snap is not None and name.endswith(".toml") and "projects" in tomllib.loads(contents(snap).decode())
+                           for name, snap in project_snapshots.items())
+        if has_projects:
+            say("  Info  projects は取り込み対象外・適用するTOMLでは配置先の内容を保持します。TOMLを正規化し、コメントは引き継ぎません。")
         preview(source_dir, target_dir, old, desired, label, next_number, capture)
         if not confirm(capture):
             return
-        if checked_files(source_dir, required=True) != source or checked_files(target_dir, required=False) != before or head() != revision:
+        if (managed_names(source_dir, target_dir, revision) != names
+                or checked_files(source_dir, required=True, local=capture, names=names) != source
+                or checked_files(target_dir, required=False, local=True, names=names) != before
+                or head() != revision):
             raise Invalid("files or Git HEAD changed during confirmation; retry")
         if capture:
             if capture_branch() != branch:

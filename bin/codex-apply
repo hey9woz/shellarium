@@ -13,14 +13,15 @@ Options:
   -h, --help     Show help
 
 Files:
-  ${CODEX_HOME:-$HOME/.codex}/{config.toml,AGENTS.md}
-  scripts/codex-apply/config/{config.toml,AGENTS.md} in this repository
+  ${CODEX_HOME:-$HOME/.codex}/{config.toml,AGENTS.md,*.config.toml}
+  scripts/codex-apply/config/ in this repository
 
 Behavior:
   Validate, show the full diff, then ask for confirmation (default: No).
-  Apply replaces whole files; local-only settings may be removed.
+  Apply preserves local projects settings and synchronizes the profile file set.
+  Destination-only *.config.toml files are deleted after confirmation.
   Keep one previous backup per target under XDG_STATE_HOME/codex-apply.
-  Capture commits only these two files, rejects suspected secrets, and never pushes.
+  Capture commits only managed settings, rejects suspected secrets, and never pushes.
 
 Requirements:
   Bash, Python 3.11+ (tomllib), Git. Confirmation requires a terminal.

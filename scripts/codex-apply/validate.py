@@ -35,6 +35,13 @@ MCP_LIST = {"args", "enabled_tools", "disabled_tools"}
 MCP_BOOL = {"enabled", "required"}
 MCP_NUM = {"startup_timeout_sec", "tool_timeout_sec"}
 
+TUI_BOOL = {"animations", "disable_paste_burst", "vim_mode_default", "raw_output_mode",
+            "show_tooltips", "auto_recap", "show_server_version_notice", "screen_reader_detection_done",
+            "status_line_use_colors"}
+TUI_STR = {"notification_method", "notification_condition", "alternate_screen", "resume_cwd", "theme"}
+TUI_LIST = {"status_line", "terminal_title"}
+
+
 
 def reject(file, path, reason):
     # Unknown keys can themselves be secrets; report the location, not the name.
@@ -156,9 +163,48 @@ def mcp(server, file):
             reject(file, path + ".<unsupported>", "unsupported or literal-credential setting; env/http_headers/oauth secrets are not distributable")
 
 
-def config(data, file, profile=False):
+def tui(settings, file):
+    expect(settings, dict, file, "tui")
+    for key, value in settings.items():
+        path = "tui." + key if key in TUI_BOOL | TUI_STR | TUI_LIST | {"notifications", "keymap", "model_availability_nux"} else "tui.<unsupported>"
+        if key in TUI_BOOL:
+            expect(value, bool, file, path)
+        elif key in TUI_STR:
+            expect(value, str, file, path)
+        elif key in TUI_LIST:
+            string_list(value, file, path)
+        elif key == "notifications":
+            if type(value) is not bool:
+                string_list(value, file, path)
+        elif key == "keymap":
+            expect(value, dict, file, path)
+            for bindings in value.values():
+                expect(bindings, dict, file, "tui.keymap.<context>")
+                for binding in bindings.values():
+                    if not isinstance(binding, str):
+                        string_list(binding, file, "tui.keymap.<context>.<action>")
+        elif key == "model_availability_nux":
+            expect(value, dict, file, path)
+            for timestamp in value.values():
+                expect(timestamp, int, file, path)
+        else:
+            reject(file, path, "unsupported TUI setting")
+
+
+def projects(settings, file):
+    expect(settings, dict, file, "projects")
+    for project in settings.values():
+        expect(project, dict, file, "projects.<path>")
+        if set(project) - {"trust_level"}:
+            reject(file, "projects.<path>.<unsupported>", "unsupported machine-local project setting")
+        if "trust_level" in project and project["trust_level"] not in ("trusted", "untrusted"):
+            reject(file, "projects.<path>.trust_level", "expected trusted or untrusted")
+
+
+
+def config(data, file, profile=False, allow_projects=False):
     for key, value in data.items():
-        path = key if key in ROOT_STR | ROOT_BOOL | ROOT_INT | {"profiles", "features", "history", "sandbox_workspace_write", "mcp_servers", "model_providers"} else "<unsupported>"
+        path = key if key in ROOT_STR | ROOT_BOOL | ROOT_INT | {"profiles", "features", "history", "sandbox_workspace_write", "mcp_servers", "model_providers", "tui", "projects"} else "<unsupported>"
         if key in ROOT_STR:
             expect(value, str, file, path)
         elif key in ROOT_BOOL:
@@ -194,6 +240,12 @@ def config(data, file, profile=False):
                     expect(setting, bool, file, path)
                 else:
                     reject(file, path, "unsupported sandbox setting")
+        elif key == "tui":
+            tui(value, file)
+        elif key == "projects":
+            if not allow_projects or profile:
+                reject(file, path, "machine-local project settings must not be included in shared config; recapture to exclude them")
+            projects(value, file)
         elif key == "mcp_servers":
             expect(value, dict, file, path)
             for server in value.values():
@@ -217,18 +269,19 @@ def config(data, file, profile=False):
             reject(file, path, "unsupported distribution setting")
 
 
-def validate(name, content):
+def validate(name, content, allow_projects=False):
     try:
         text = content.decode("utf-8")
     except UnicodeError:
         reject(name, "text", "expected UTF-8")
-    scan(text, name, assignments=name != "config.toml")
-    if name == "config.toml":
+    is_toml = name == "config.toml" or name.endswith(".config.toml")
+    scan(text, name, assignments=not is_toml)
+    if is_toml:
         try:
             data = tomllib.loads(text)
         except tomllib.TOMLDecodeError:
             reject(name, "TOML", "invalid TOML")
-        config(data, name)
+        config(data, name, allow_projects=allow_projects)
         # Check scalar contents, not TOML key/value syntax: header mappings such
         # as "X-API-Key" = "TOKEN_NAME" are legitimate environment references.
         def strings(value):

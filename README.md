@@ -101,7 +101,7 @@ layout --dry-run random
 
 ### `codex-apply`
 
-Codexのグローバル `config.toml` と `AGENTS.md` を取り込み・適用します。
+Codexのグローバル `config.toml`・`AGENTS.md`・各プロファイルの `*.config.toml` を取り込み・適用します。
 Bash、Git、Python 3.11以降が必要です。毎回差分を表示し、確認後だけ変更します。
 
 ```bash
@@ -110,8 +110,10 @@ codex-apply            # 管理元の設定をこの端末へ適用
 codex-apply --help
 ```
 
-認証情報を検証してから差分を表示します。通常適用はファイル単位の置き換えで、バックアップは配置先ごとに1世代だけ保持します。
-`--capture` は対象2ファイルだけを `chore(codex-apply): capture v0001` の形式でコミットします。pushは行いません。
+認証情報を検証してから差分を表示します。通常適用は `projects` を除いて置き換え、バックアップは配置先ごとに1世代だけ保持します。
+端末固有の `projects` はcaptureで除外し、適用先の設定を保持します。
+配布元にないプロファイルは、削除差分を確認・承認した後に削除して同期します。
+`--capture` はこれらの対象ファイルだけを `chore(codex-apply): capture v0001` の形式でコミットします。pushは行いません。
 初回はこの端末の設定からcaptureしてください。設定後のCodex起動は通常の `codex` コマンドです。
 
 詳細: [`scripts/codex-apply/README.md`](./scripts/codex-apply/README.md)

@@ -21,17 +21,18 @@ codex-apply --help
 ## 初回の取り込み
 
 初回は配布する設定ファイルを同梱していません。この端末で用意した設定から取り込みます。
-対象は `${CODEX_HOME:-$HOME/.codex}/config.toml` と同ディレクトリの `AGENTS.md` の2ファイルです。
-どちらかがない場合は、内容を自分で用意してから実行してください。存在しないファイルを勝手に空ファイルへ置き換えることはありません。
+対象は `${CODEX_HOME:-$HOME/.codex}/config.toml` と同ディレクトリの `AGENTS.md`、および直下の `*.config.toml` です。
+たとえば `careful.config.toml`・`daily.config.toml`・`review.config.toml` を自動検出します。プロファイル名は英数字・ハイフン・アンダースコアを使用してください。
+必須の `config.toml` / `AGENTS.md` のどちらかがない場合は、内容を自分で用意してから実行してください。存在しないファイルを勝手に空ファイルへ置き換えることはありません。
 
 ```bash
 codex-apply --capture
 ```
 
-1. 2ファイルを検証します。秘密情報が疑われる場合は、値を表示せず停止します。
+1. 基本設定と検出した全プロファイルを検証します。秘密情報が疑われる場合は、値を表示せず停止します。
 2. 取り込み先・差分・次のバージョン・コミットメッセージを表示します。
 3. `取り込み・コミットを実行しますか？ [y/N]` に `y` / `yes` と答えた場合だけ取り込みます。
-4. `scripts/codex-apply/config/{config.toml,AGENTS.md}` だけをコミットします。
+4. `scripts/codex-apply/config/` の基本設定と `*.config.toml` の追加・更新・削除だけをコミットします。
 
 確認前に秘密情報の検証を行い、確認中にファイルやGit HEADが変わった場合は停止します。
 コミットメッセージは次の形式です。
@@ -45,7 +46,7 @@ chore(codex-apply): capture v0002
 差分なしの場合はコミット・採番をしません。GitのコミットIDも表示します。
 複数ブランチでそれぞれcaptureすると番号が重複し得るため、連番管理は1つのブランチで行ってください。
 
-無関係な作業ツリー・ステージ済み変更はコミットに含めません。管理対象2ファイルが既にステージされている場合、または別の未コミット編集がある場合は停止します。
+無関係な作業ツリー・ステージ済み変更はコミットに含めません。管理対象の設定ファイルが既にステージされている場合、または別の未コミット編集がある場合は停止します。
 pre-commit / prepare-commit-msg / commit-msg を別インデックスで実行し、その後に対象・内容・定型メッセージが変わっていないことを検証します。hookによる自動修正や追加ステージは停止対象です。commit.gpgsignによる署名にも対応します。信頼できるhooks/filterだけを使ってください。
 検証済みツリーからコミットを作成し、HEADが変わっていない場合だけブランチを更新します。post-commitの失敗は警告として表示し、作成済みコミットは残します。
 マージ・rebase・cherry-pick等の進行中、または未解決のインデックスがある場合はcaptureを拒否します。
@@ -61,12 +62,16 @@ codex-apply
 ```
 
 配置先・変更ファイル・差分を表示し、確認後に適用します。
+**capture・適用とも、配布元にないプロファイルファイルは `DELETE` として表示し、承認後に削除して同期します。** `.config.toml` 以外のファイルやサブディレクトリ内のファイルは削除しません。
+通常適用では削除するプロファイルもバックアップに含めます。captureで削除した共有プロファイルはGit履歴から復元できます。
 `--dry-run` はありません。Enterだけ、または `y` / `yes` 以外ならキャンセルします。
-**ファイル単位で管理元の内容に置き換えます。** 端末側だけの設定・プロファイルが消える場合もあるため、差分を確認してください。
+**`projects` を除き、管理元の内容に置き換えます。** `projects` はcaptureでは除外し、適用時は配置先のプロジェクトパス・信頼設定を保持します。それ以外の端末側だけの設定が消える場合もあるため、差分を確認してください。
+`projects` の除外・保持は、残すプロファイルTOMLにも適用します。削除対象プロファイルはファイル全体を削除します。
+`projects` を除外・保持する際はTOMLを解析して再出力するため、表記を正規化しコメントは引き継ぎません。captureで元の端末設定は変更しません。適用時のバックアップには変更前の全文を保存します。
 管理元と配置済みファイルの両方を検証するので、配置済みファイルに認証情報・未対応設定がある場合も、差分を表示せず停止します。
 
 設定を更新する場合は、端末の設定を編集して再度 `--capture` します。
-Git管理の2ファイルを直接編集した場合は、別途レビュー・コミットしてから適用してください。
+Git管理の設定ファイルを直接編集した場合は、別途レビュー・コミットしてから適用してください。
 適用そのものではコミットしません。差分なし・キャンセル時は設定とバックアップを変更しません。
 
 `CODEX_HOME` を使う場合は絶対パスを指定します。
@@ -76,7 +81,7 @@ CODEX_HOME="$HOME/codex-settings" codex-apply
 ```
 
 シンボリックリンクを経由するパス、配置先がディレクトリの場合、リポジトリ内への設定・状態ファイルの生成は拒否します。
-`auth.json`、履歴・ログ、別のプロファイルファイルなどは読み取り・コピー対象ではありません。
+`auth.json`、履歴・ログなどは読み取り・コピー対象ではありません。
 
 ## バリデーション
 
@@ -91,12 +96,14 @@ CODEX_HOME="$HOME/codex-settings" codex-apply
 - モデル・推論・verbosity・approval・sandbox・personality・web searchなどの基本設定
 - `[profiles.<name>]` 内の同じ設定項目
 - `[features]` のbool値、history、sandbox_workspace_writeの一部
+- `[tui]` の通知・画面・キーバインド設定と、`screen_reader_detection_done` / `model_availability_nux` の状態値
 - `[model_providers.<name>]` の基本項目と `env_key` による環境変数名指定
 - 次に示すMCP設定
 
-未対応設定、端末固有のプロジェクトパス、絶対パス・ホーム依存のMCPコマンドやcwdは停止します。
+未対応設定、絶対パス・ホーム依存のMCPコマンドやcwdは停止します。`projects` のパスと `trust_level` は端末内だけで扱い、共有設定には保存しません。共有側に `projects` が残っている場合、通常適用は停止します。`--capture` は移行のため既存の共有設定・コミット済み設定の `projects` を許可し、差分確認・承認後に `projects` を含まない端末の設定へ置き換えます。基本設定・プロファイルとも対象です。秘密情報の検査や未コミット編集の保護は維持します。過去のGit履歴は書き換えません。
 必要な項目は、公式仕様と秘密情報の扱いを確認してから許可リストへ追加してください。
-別ファイルのプロファイルは今回の配布対象に含めません。
+プロファイルTOMLも基本設定と同じ許可リスト・秘密情報検査で検証します。別ファイルにはトップレベルの設定を記述してください。
+[プロファイルの公式仕様](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles)
 [Codex設定リファレンス](https://developers.openai.com/codex/config-reference/)
 
 ### MCPは環境変数参照を使う
@@ -125,7 +132,7 @@ env_http_headers = { "X-API-Key" = "EXAMPLE_API_KEY" }
 
 ### 秘密情報の検出と限界
 
-両ファイルの既知のトークン形式、秘密鍵、認証情報らしい代入、ランダムな認証文字列らしい値、端末制御文字を検査します。
+全対象ファイルの既知のトークン形式、秘密鍵、認証情報らしい代入、ランダムな認証文字列らしい値、端末制御文字を検査します。
 TOMLは文字列のエスケープを解いた内容も検査し、コメントも検査対象です。
 `AGENTS.md` の自由文や短い任意の文字列から、秘密情報を完全に判別することはできません。誤検知・見逃しの可能性があります。
 保存前の差分確認とコミット前のレビューも行ってください。検出時に自動削除・自動マスクして取り込む処理はしません。
@@ -139,19 +146,19 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/codex-apply/<配置先のハッシュ>/bac
 ```
 
 成功後にバックアップを入れ替えるため、日時付きファイルが増え続けることはありません。
-内容には変更前の両ファイル、権限、元ファイルが存在しなかったこと、配置先が記録されます。
+内容には変更前の対象ファイルすべて、権限、元ファイルが存在しなかったこと、配置先が記録されます。
 バックアップと新規設定ファイルは `0600`、新規ディレクトリは `0700` で作成します。
 
-適用途中の通常エラーでは、両ファイルを変更前の状態へ戻し、前世代のバックアップを保持します。
+適用途中の通常エラーでは、削除したプロファイルも含めて変更前の状態へ戻し、前世代のバックアップを保持します。
 強制終了や復元の失敗で `pending.json` が残った場合、次回は停止して復元情報の場所を表示します。
 同時実行はロックで防ぎます。外部のエディターやGit操作と同時に更新しないでください。
 
 手動復元はCodexを終了し、表示された `backup.json`（未完了操作なら `pending.json`）の `target` と内容を確認して行います。
-次は確認後に明示的な1つの復元情報を指定する例です。元の対象2ファイルを上書きし、元々存在しなかったファイルは削除します。
+次は確認後に明示的な1つの復元情報を指定する例です。記録された対象ファイルを上書きし、元々存在しなかったファイルは削除します。
 
 ```bash
 python3 - /exact/path/to/backup.json <<'PY'
-import base64, json, os, pathlib, sys
+import base64, json, os, pathlib, re, sys
 record = json.loads(pathlib.Path(sys.argv[1]).read_text())
 target = pathlib.Path(record["target"])
 print("Restore target:", target)
@@ -160,7 +167,10 @@ with open("/dev/tty", "r") as reader, open("/dev/tty", "w") as writer:
     writer.flush()
     if reader.readline().strip().lower() != "y":
         raise SystemExit(0)
-for name in ("config.toml", "AGENTS.md"):
+names = tuple(record["files"])
+if any(name not in {"config.toml", "AGENTS.md"} and not re.fullmatch(r"[A-Za-z0-9_-]+\.config\.toml", name) for name in names):
+    raise SystemExit("Unexpected filename in recovery data")
+for name in names:
     path = target / name
     if path.is_symlink():
         raise SystemExit("Refusing a symbolic link")
