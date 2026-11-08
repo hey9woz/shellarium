@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# codex-apply - apply or capture global Codex settings (Bash, Python 3.11+, Git).
+usage() {
+  cat <<'USAGE'
+Usage:
+  codex-apply
+  codex-apply --capture
+
+Options:
+      --capture  Capture this machine's config and commit a numbered version
+  -h, --help     Show help
+
+Files:
+  ${CODEX_HOME:-$HOME/.codex}/{config.toml,AGENTS.md}
+  scripts/codex-apply/config/{config.toml,AGENTS.md} in this repository
+
+Behavior:
+  Validate, show the full diff, then ask for confirmation (default: No).
+  Apply replaces whole files; local-only settings may be removed.
+  Keep one previous backup per target under XDG_STATE_HOME/codex-apply.
+  Capture commits only these two files, rejects suspected secrets, and never pushes.
+
+Requirements:
+  Bash, Python 3.11+ (tomllib), Git. Confirmation requires a terminal.
+
+Examples:
+  codex-apply --capture
+  codex-apply
+USAGE
+}
+case "${1:-}" in
+  -h|--help) [[ $# == 1 ]] || { usage >&2; exit 1; }; usage; exit 0 ;;
+  --capture) [[ $# == 1 ]] || { usage >&2; exit 1; } ;;
+  '') [[ $# == 0 ]] || { usage >&2; exit 1; } ;;
+  *) usage >&2; exit 1 ;;
+esac
+for dependency in python3 git; do
+  command -v "$dependency" >/dev/null 2>&1 || {
+    printf 'codex-apply: missing dependency: %s\n' "$dependency" >&2
+    exit 1
+  }
+done
+python3 -c 'import tomllib' 2>/dev/null || {
+  printf '%s\n' 'codex-apply: Python 3.11+ with tomllib is required' >&2
+  exit 1
+}
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+exec python3 "${script_dir}/../scripts/codex-apply/manage.py" "$@"

@@ -99,6 +99,23 @@ layout --dry-run random
 
 詳細: [`scripts/layout/README.md`](./scripts/layout/README.md)
 
+### `codex-apply`
+
+Codexのグローバル `config.toml` と `AGENTS.md` を取り込み・適用します。
+Bash、Git、Python 3.11以降が必要です。毎回差分を表示し、確認後だけ変更します。
+
+```bash
+codex-apply --capture  # この端末の設定を取り込み、定型の連番コミットを作成
+codex-apply            # 管理元の設定をこの端末へ適用
+codex-apply --help
+```
+
+認証情報を検証してから差分を表示します。通常適用はファイル単位の置き換えで、バックアップは配置先ごとに1世代だけ保持します。
+`--capture` は対象2ファイルだけを `chore(codex-apply): capture v0001` の形式でコミットします。pushは行いません。
+初回はこの端末の設定からcaptureしてください。設定後のCodex起動は通常の `codex` コマンドです。
+
+詳細: [`scripts/codex-apply/README.md`](./scripts/codex-apply/README.md)
+
 ## 🧬 Repository Map
 
 ```text
@@ -123,7 +140,16 @@ shellarium/
 
 ## 🧪 Diagnostics
 
-変更後の最小チェック:
+Codex設定管理のオフライン検証（使い捨てリポジトリでコミット動作も確認）:
+
+```bash
+bash -n bin/codex-apply
+shellcheck bin/codex-apply
+./bin/codex-apply --help
+python3 scripts/codex-apply/test_manage.py
+```
+
+既存コマンド変更後の最小チェック:
 
 ```bash
 bash -n bin/countdown
