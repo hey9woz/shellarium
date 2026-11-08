@@ -1,0 +1,19 @@
+"model_reasoning_effort" = "medium"
+"model_reasoning_summary" = "auto"
+"approval_policy" = "on-request"
+"sandbox_mode" = "workspace-write"
+"web_search" = "cached"
+
+["sandbox_workspace_write"]
+"network_access" = false
+
+["tui"]
+"screen_reader_detection_done" = true
+
+["tui"."model_availability_nux"]
+"gpt-6.1-sol" = 4
+
+["mcp_servers"]
+
+["mcp_servers"."openaiDeveloperDocs"]
+"url" = "https://developers.openai.com/mcp"

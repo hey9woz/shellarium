@@ -1,0 +1,10 @@
+# 調査・コードレビュー
+model_reasoning_effort = "high"
+approval_policy = "on-request"
+sandbox_mode = "read-only"
+web_search = "cached"
+
+[tui]
+status_line = ["model-with-reasoning", "current-dir", "thread-name"]
+status_line_use_colors = true
+theme = "dark-neon"

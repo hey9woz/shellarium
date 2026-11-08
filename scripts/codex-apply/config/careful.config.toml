@@ -1,0 +1,5 @@
+# 認証＿DB移行など慎重に・用心して行うタスクの分析
+model_reasoning_effort = "high"
+approval_policy = "on-request"
+sandbox_mode = "read-only"
+web_search = "disabled"
